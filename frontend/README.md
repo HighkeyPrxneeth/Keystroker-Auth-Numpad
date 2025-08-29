@@ -1,70 +1,109 @@
-# Getting Started with Create React App
+# Keystroke Dynamics Authentication - Frontend
 
-This project was bootstrapped with [Create React App](https://github.com/facebook/create-react-app).
+React-based frontend for the Keystroke Dynamics Authentication System. This application provides a modern, intuitive interface for user registration, keystroke pattern enrollment, and biometric authentication.
 
-## Available Scripts
+## 🚀 Features
 
-In the project directory, you can run:
+- **User Registration**: Clean interface for creating new user accounts
+- **Keystroke Pattern Enrollment**: Real-time progress tracking during pattern collection
+- **Authentication Interface**: Secure login with keystroke verification
+- **Real-time Feedback**: Live display of authentication results and confidence scores
+- **Modern UI Design**: Purple gradient theme with responsive layout
+- **Performance Metrics**: Display of processing times and system statistics
 
-### `npm start`
+## 📱 Screenshots
 
-Runs the app in the development mode.\
-Open [http://localhost:3000](http://localhost:3000) to view it in your browser.
+### User Registration Interface
+![User Registration](../screenshots/registration.png)
 
-The page will reload when you make changes.\
-You may also see any lint errors in the console.
+### Keystroke Enrollment Process
+![Enrollment Start](../screenshots/enrollment.png)
+![Enrollment Progress](../screenshots/enrollment-progress.png)
+![Enrollment Complete](../screenshots/enrollment-complete.png)
 
-### `npm test`
+### Authentication Process
+![Authentication](../screenshots/authentication.png)
+![Authentication Success](../screenshots/authentication-success.png)
 
-Launches the test runner in the interactive watch mode.\
-See the section about [running tests](https://facebook.github.io/create-react-app/docs/running-tests) for more information.
+## 🛠️ Development
 
-### `npm run build`
+### Prerequisites
+- Node.js 16+ 
+- npm or yarn
 
-Builds the app for production to the `build` folder.\
-It correctly bundles React in production mode and optimizes the build for the best performance.
+### Installation
+```bash
+npm install --legacy-peer-deps
+```
 
-The build is minified and the filenames include the hashes.\
-Your app is ready to be deployed!
+### Available Scripts
 
-See the section about [deployment](https://facebook.github.io/create-react-app/docs/deployment) for more information.
+#### `npm start`
+Runs the app in development mode at [http://localhost:3000](http://localhost:3000).
+The page will reload when you make changes.
 
-### `npm run eject`
+#### `npm test`
+Launches the test runner in interactive watch mode.
 
-**Note: this is a one-way operation. Once you `eject`, you can't go back!**
+#### `npm run build`
+Builds the app for production to the `build` folder with optimized performance.
 
-If you aren't satisfied with the build tool and configuration choices, you can `eject` at any time. This command will remove the single build dependency from your project.
 
-Instead, it will copy all the configuration files and the transitive dependencies (webpack, Babel, ESLint, etc) right into your project so you have full control over them. All of the commands except `eject` will still work, but they will point to the copied scripts so you can tweak them. At this point you're on your own.
+## 🏗️ Project Structure
 
-You don't have to ever use `eject`. The curated feature set is suitable for small and middle deployments, and you shouldn't feel obligated to use this feature. However we understand that this tool wouldn't be useful if you couldn't customize it when you are ready for it.
+```
+src/
+├── components/
+│   ├── SystemStats.js          # System performance metrics
+│   ├── UserAuthentication.js   # Login with keystroke verification
+│   ├── UserEnrollment.js       # Keystroke pattern training
+│   └── UserRegistration.js     # User account creation
+├── hooks/
+│   └── useKeystrokeCapture.js  # Custom hook for capturing typing patterns
+├── services/
+│   └── api.js                  # Backend API communication
+├── App.js                      # Main application component
+├── App.css                     # Global styles and theme
+└── index.js                    # Application entry point
+```
 
-## Learn More
+## 🎨 Styling
 
-You can learn more in the [Create React App documentation](https://facebook.github.io/create-react-app/docs/getting-started).
+The application uses a modern purple gradient theme with:
+- Clean, minimalist design
+- Responsive layout for all screen sizes
+- Real-time visual feedback during interactions
+- Professional color scheme with purple gradients
+- Smooth animations and transitions
 
-To learn React, check out the [React documentation](https://reactjs.org/).
+## 🔌 API Integration
 
-### Code Splitting
+The frontend communicates with the FastAPI backend through:
+- RESTful API calls for user management
+- Real-time keystroke data transmission
+- Authentication result processing
+- System statistics display
 
-This section has moved here: [https://facebook.github.io/create-react-app/docs/code-splitting](https://facebook.github.io/create-react-app/docs/code-splitting)
+## 🚀 Getting Started
 
-### Analyzing the Bundle Size
+1. **Start the backend server** (ensure it's running on port 8000)
+2. **Install dependencies**: `npm install --legacy-peer-deps`
+3. **Start development server**: `npm start`
+4. **Open browser**: Navigate to [http://localhost:3000](http://localhost:3000)
 
-This section has moved here: [https://facebook.github.io/create-react-app/docs/analyzing-the-bundle-size](https://facebook.github.io/create-react-app/docs/analyzing-the-bundle-size)
+## 📈 Performance
 
-### Making a Progressive Web App
+- **Lightweight bundle**: Optimized React components
+- **Fast rendering**: Efficient state management
+- **Real-time updates**: Immediate feedback during authentication
+- **Cross-browser compatibility**: Works on all modern browsers
 
-This section has moved here: [https://facebook.github.io/create-react-app/docs/making-a-progressive-web-app](https://facebook.github.io/create-react-app/docs/making-a-progressive-web-app)
+## 🤝 Contributing
 
-### Advanced Configuration
+When adding new features:
+1. Create new components in `src/components/`
+2. Add API calls to `src/services/api.js`
+3. Use the established styling patterns
+4. Test on multiple screen sizes
 
-This section has moved here: [https://facebook.github.io/create-react-app/docs/advanced-configuration](https://facebook.github.io/create-react-app/docs/advanced-configuration)
-
-### Deployment
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/deployment](https://facebook.github.io/create-react-app/docs/deployment)
-
-### `npm run build` fails to minify
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/troubleshooting#npm-run-build-fails-to-minify](https://facebook.github.io/create-react-app/docs/troubleshooting#npm-run-build-fails-to-minify)
+Built with ❤️ using React and modern web technologies.
