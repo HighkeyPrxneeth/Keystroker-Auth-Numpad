@@ -38,6 +38,14 @@ class KeystrokeMLPipeline:
         self.model_performance = {}
         self.ensemble_model = None
 
+        # Device type classification assets
+        self.device_type_models = {}
+        self.device_type_scaler = StandardScaler()
+        self.device_type_label_encoder = LabelEncoder()
+        self.device_type_model_performance = {}
+        self.device_type_model_path = self.model_save_path / "device_type_models.joblib"
+        self.device_type_ensemble = None
+
         # Authentication thresholds
         self.auth_thresholds = {}
         self.default_threshold = 0.7
@@ -102,7 +110,6 @@ class KeystrokeMLPipeline:
 
         # Convert to numpy arrays
         X = np.array(feature_vectors)
-        y = np.array(labels)
 
         # Encode labels (user_id = 1, imposter = 0)
         y_binary = np.array([1 if label == user_id else 0 for label in labels])
@@ -394,6 +401,265 @@ class KeystrokeMLPipeline:
 
         joblib.dump(model_data, user_model_path)
         logger.info(f"Saved model for user {user_id} to {user_model_path}")
+
+    def train_device_type_model(
+        self, feature_vectors: List[List[float]], labels: List[str]
+    ) -> Dict[str, Any]:
+        """Train a global classifier to distinguish numpad vs top-row input"""
+
+        if len(feature_vectors) < 4:
+            raise ValueError(
+                "Insufficient data for device type training. Need at least 4 samples."
+            )
+
+        unique_labels = set(labels)
+        if len(unique_labels) < 2:
+            raise ValueError(
+                "Device type classifier requires samples from at least two input types"
+            )
+
+        logger.info(
+            "Training device type classifier with %d samples (%s)",
+            len(feature_vectors),
+            unique_labels,
+        )
+
+        X = np.array(feature_vectors)
+        y_encoded = self.device_type_label_encoder.fit_transform(labels)
+        X_scaled = self.device_type_scaler.fit_transform(X)
+
+        class_counts = np.bincount(y_encoded)
+        min_class_samples = class_counts.min() if len(class_counts) > 0 else 0
+        use_cross_validation = min_class_samples >= 2 and len(X_scaled) >= 4
+        n_folds = 2
+
+        if use_cross_validation:
+            n_folds = min(5, len(X_scaled), int(min_class_samples))
+            if n_folds < 2:
+                use_cross_validation = False
+
+        cv = (
+            StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=42)
+            if use_cross_validation
+            else None
+        )
+
+        model_scores: Dict[str, Dict[str, Any]] = {}
+        trained_models: Dict[str, Any] = {}
+
+        for model_name, model in self.models.items():
+            try:
+                model_clone = model.__class__(**model.get_params())
+
+                if model_name == "knn":
+                    n_neighbors = model_clone.get_params()["n_neighbors"]
+                    max_neighbors = len(X_scaled) - 1
+                    if max_neighbors >= 1 and n_neighbors > max_neighbors:
+                        model_clone.set_params(n_neighbors=max(1, max_neighbors))
+
+                model_clone.fit(X_scaled, y_encoded)
+
+                if use_cross_validation and cv is not None:
+                    cv_scores = cross_val_score(
+                        model_clone,
+                        X_scaled,
+                        y_encoded,
+                        cv=cv,
+                        scoring="accuracy",
+                    )
+                    mean_score = float(cv_scores.mean())
+                    std_score = float(cv_scores.std())
+                else:
+                    mean_score = float(model_clone.score(X_scaled, y_encoded))
+                    std_score = 0.0
+
+                model_scores[model_name] = {
+                    "cv_mean": mean_score,
+                    "cv_std": std_score,
+                    "model": model_clone,
+                }
+                trained_models[model_name] = model_clone
+
+                logger.info(
+                    "Device type model %s accuracy: %.3f (cv=%s)",
+                    model_name,
+                    mean_score,
+                    "yes" if use_cross_validation else "no",
+                )
+
+            except Exception as exc:
+                logger.error("Error training device type model %s: %s", model_name, exc)
+
+        # Build ensemble if possible
+        ensemble_estimators = [
+            (name, info["model"]) for name, info in model_scores.items()
+        ]
+
+        if ensemble_estimators:
+            ensemble = VotingClassifier(estimators=ensemble_estimators, voting="soft")
+            ensemble.fit(X_scaled, y_encoded)
+
+            if use_cross_validation and cv is not None:
+                ensemble_scores = cross_val_score(
+                    ensemble, X_scaled, y_encoded, cv=cv, scoring="accuracy"
+                )
+                ensemble_mean = float(ensemble_scores.mean())
+                ensemble_std = float(ensemble_scores.std())
+            else:
+                ensemble_mean = float(ensemble.score(X_scaled, y_encoded))
+                ensemble_std = 0.0
+
+            model_scores["ensemble"] = {
+                "cv_mean": ensemble_mean,
+                "cv_std": ensemble_std,
+                "model": ensemble,
+            }
+            trained_models["ensemble"] = ensemble
+            self.device_type_ensemble = ensemble
+
+        class_distribution = {
+            self.device_type_label_encoder.inverse_transform([idx])[0]: int(count)
+            for idx, count in enumerate(class_counts)
+        }
+
+        self.device_type_models = trained_models
+        self.device_type_model_performance = {
+            name: info["cv_mean"] for name, info in model_scores.items()
+        }
+
+        self._save_device_type_model(
+            trained_models, self.device_type_scaler, self.device_type_label_encoder
+        )
+
+        return {
+            "samples_trained": len(X_scaled),
+            "class_distribution": class_distribution,
+            "model_scores": {
+                name: info["cv_mean"] for name, info in model_scores.items()
+            },
+            "cross_validated": use_cross_validation,
+        }
+
+    def _save_device_type_model(
+        self,
+        models: Dict[str, Any],
+        scaler: StandardScaler,
+        label_encoder: LabelEncoder,
+    ):
+        """Persist the global device type classifier"""
+
+        model_data = {
+            "models": models,
+            "scaler": scaler,
+            "label_encoder": label_encoder,
+            "trained_at": datetime.utcnow().isoformat(),
+            "performance": self.device_type_model_performance,
+        }
+
+        joblib.dump(model_data, self.device_type_model_path)
+        logger.info("Saved device type model to %s", self.device_type_model_path)
+
+    def _load_device_type_model(self) -> Optional[Dict[str, Any]]:
+        """Load the device type classifier from disk if not cached"""
+
+        if self.device_type_models:
+            return {
+                "models": self.device_type_models,
+                "scaler": self.device_type_scaler,
+                "label_encoder": self.device_type_label_encoder,
+            }
+
+        if not self.device_type_model_path.exists():
+            return None
+
+        try:
+            model_data = joblib.load(self.device_type_model_path)
+            self.device_type_models = model_data.get("models", {})
+            self.device_type_scaler = model_data.get("scaler", StandardScaler())
+            self.device_type_label_encoder = model_data.get(
+                "label_encoder", LabelEncoder()
+            )
+            self.device_type_model_performance = model_data.get("performance", {})
+            self.device_type_ensemble = self.device_type_models.get("ensemble")
+
+            return {
+                "models": self.device_type_models,
+                "scaler": self.device_type_scaler,
+                "label_encoder": self.device_type_label_encoder,
+            }
+
+        except Exception as exc:
+            logger.error("Failed to load device type model: %s", exc)
+            self.device_type_models = {}
+            self.device_type_ensemble = None
+            return None
+
+    def classify_device_type(
+        self, feature_vector: List[float]
+    ) -> Optional[Dict[str, Any]]:
+        """Predict whether a pattern was typed on the numpad or key row"""
+
+        model_data = self._load_device_type_model()
+        if not model_data:
+            return None
+
+        models = model_data.get("models", {})
+        if not models:
+            return None
+
+        scaler: StandardScaler = model_data["scaler"]
+        label_encoder: LabelEncoder = model_data["label_encoder"]
+
+        X_scaled = scaler.transform([feature_vector])
+
+        probabilities: Dict[str, float] = {}
+        confidence = 0.0
+        predicted_label: Optional[str] = None
+        model_used = "ensemble"
+
+        if "ensemble" in models:
+            ensemble_model = models["ensemble"]
+            proba = ensemble_model.predict_proba(X_scaled)[0]
+            for idx, value in enumerate(proba):
+                label = label_encoder.inverse_transform([idx])[0]
+                probabilities[label] = float(value)
+            best_index = int(np.argmax(proba))
+            predicted_label = label_encoder.inverse_transform([best_index])[0]
+            confidence = float(proba[best_index])
+        else:
+            aggregate = np.zeros(len(label_encoder.classes_), dtype=float)
+            valid_models = 0
+
+            for model_name, model in models.items():
+                try:
+                    proba = model.predict_proba(X_scaled)[0]
+                    aggregate += proba
+                    valid_models += 1
+                except Exception as exc:
+                    logger.error(
+                        "Device type model %s failed to produce probabilities: %s",
+                        model_name,
+                        exc,
+                    )
+
+            if valid_models == 0:
+                return None
+
+            aggregate /= valid_models
+            for idx, value in enumerate(aggregate):
+                label = label_encoder.inverse_transform([idx])[0]
+                probabilities[label] = float(value)
+            best_index = int(np.argmax(aggregate))
+            predicted_label = label_encoder.inverse_transform([best_index])[0]
+            confidence = float(aggregate[best_index])
+            model_used = "average"
+
+        return {
+            "predicted_device_type": predicted_label,
+            "confidence": confidence,
+            "model_used": model_used,
+            "probabilities": probabilities,
+        }
 
     def _load_user_model(self, user_id: str) -> Optional[Dict]:
         """Load trained models for a user"""

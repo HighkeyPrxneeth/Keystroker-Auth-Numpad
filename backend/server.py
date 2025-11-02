@@ -12,7 +12,20 @@ from feature_extraction import KeystrokeFeatureExtractor, validate_keystroke_dat
 from ml_pipeline import KeystrokeMLPipeline
 
 # Import our custom modules
-from models import *
+from models import (
+    AuthenticationAttempt,
+    AuthenticationRequest,
+    AuthenticationResponse,
+    AuthenticationStatus,
+    EnrollmentRequest,
+    EnrollmentResponse,
+    InputDeviceType,
+    KeystrokeDataInput,
+    KeystrokePattern,
+    User,
+    UserCreate,
+    UserResponse,
+)
 from motor.motor_asyncio import AsyncIOMotorClient
 from starlette.middleware.cors import CORSMiddleware
 
@@ -30,6 +43,7 @@ ml_pipeline = KeystrokeMLPipeline()
 
 # Thread pool for ML operations
 executor = ThreadPoolExecutor(max_workers=4)
+device_type_training_lock = asyncio.Lock()
 
 # Create the main app without a prefix
 app = FastAPI(
@@ -45,6 +59,59 @@ api_router = APIRouter(prefix="/api")
 users_collection = db.users
 patterns_collection = db.keystroke_patterns
 attempts_collection = db.authentication_attempts
+
+
+async def retrain_device_type_classifier():
+    """Retrain the global classifier that differentiates numpad vs key-row input."""
+
+    async with device_type_training_lock:
+        cursor = patterns_collection.find(
+            {
+                "input_device_type": {
+                    "$in": [
+                        InputDeviceType.KEYROW.value,
+                        InputDeviceType.NUMPAD.value,
+                    ]
+                }
+            }
+        )
+        pattern_docs = await cursor.to_list(length=None)
+
+        feature_vectors = []
+        labels = []
+
+        for doc in pattern_docs:
+            feature_vector = doc.get("feature_vector")
+            device_type = doc.get("input_device_type")
+            if feature_vector and device_type:
+                feature_vectors.append(feature_vector)
+                labels.append(device_type)
+
+        if len(feature_vectors) < 4 or len(set(labels)) < 2:
+            logger.info(
+                "Skipping device type training (samples=%d, types=%d)",
+                len(feature_vectors),
+                len(set(labels)),
+            )
+            return None
+
+        loop = asyncio.get_event_loop()
+
+        try:
+            result = await loop.run_in_executor(
+                executor,
+                ml_pipeline.train_device_type_model,
+                feature_vectors,
+                labels,
+            )
+            logger.info(
+                "Device type model updated. Scores: %s",
+                result.get("model_scores", {}),
+            )
+            return result
+        except Exception as exc:
+            logger.error(f"Device type training failed: {exc}")
+            return None
 
 
 # Basic health check routes
@@ -136,6 +203,59 @@ async def list_users(skip: int = 0, limit: int = 100):
             )
         )
 
+
+@api_router.post("/classify-device", response_model=DeviceClassificationResponse)
+async def classify_input_device(pattern: KeystrokeDataInput):
+    """Classify whether a keystroke pattern originated from numpad or key row."""
+
+    if not validate_keystroke_data(pattern.events):
+        raise HTTPException(
+            status_code=400,
+            detail="Insufficient keystroke data for classification",
+        )
+
+    loop = asyncio.get_event_loop()
+
+    extracted_pattern = await loop.run_in_executor(
+        executor,
+        feature_extractor.extract_features,
+        pattern.events,
+        pattern.text_typed,
+        pattern.input_device_type,
+    )
+
+    classification = await loop.run_in_executor(
+        executor,
+        ml_pipeline.classify_device_type,
+        extracted_pattern.feature_vector,
+    )
+
+    if not classification:
+        raise HTTPException(
+            status_code=400,
+            detail="Device type model is not trained yet",
+        )
+
+    predicted_label = classification.get("predicted_device_type")
+    confidence = classification.get("confidence", 0.0)
+    model_used = classification.get("model_used", "ensemble")
+    probabilities = classification.get("probabilities", {})
+
+    try:
+        predicted_device = InputDeviceType(predicted_label)
+    except (ValueError, TypeError):
+        raise HTTPException(
+            status_code=500,
+            detail="Device classifier returned an unknown label",
+        )
+
+    return DeviceClassificationResponse(
+        predicted_device_type=predicted_device,
+        confidence=float(confidence),
+        model_used=model_used,
+        probabilities={str(key): float(value) for key, value in probabilities.items()},
+    )
+
     return users
 
 
@@ -168,6 +288,7 @@ async def collect_keystroke_pattern(
             feature_extractor.extract_features,
             pattern_data.events,
             pattern_data.text_typed,
+            pattern_data.input_device_type,
         )
 
         # Set user ID
@@ -175,6 +296,9 @@ async def collect_keystroke_pattern(
 
         # Store pattern in database
         await patterns_collection.insert_one(pattern.dict())
+
+        if pattern.input_device_type:
+            asyncio.create_task(retrain_device_type_classifier())
 
         return {
             "pattern_id": pattern.id,
@@ -216,6 +340,7 @@ async def enroll_user(enrollment_data: EnrollmentRequest):
         # Process all patterns
         feature_vectors = []
         pattern_ids = []
+        device_labeled = False
 
         loop = asyncio.get_event_loop()
 
@@ -230,6 +355,7 @@ async def enroll_user(enrollment_data: EnrollmentRequest):
                 feature_extractor.extract_features,
                 pattern_data.events,
                 pattern_data.text_typed,
+                pattern_data.input_device_type,
             )
             pattern.user_id = user.id
 
@@ -238,6 +364,9 @@ async def enroll_user(enrollment_data: EnrollmentRequest):
 
             feature_vectors.append(pattern.feature_vector)
             pattern_ids.append(pattern.id)
+
+            if pattern.input_device_type:
+                device_labeled = True
 
         if len(feature_vectors) < 3:
             raise HTTPException(
@@ -266,6 +395,9 @@ async def enroll_user(enrollment_data: EnrollmentRequest):
         training_result = await loop.run_in_executor(
             executor, ml_pipeline.train_user_model, user.id, all_features, labels
         )
+
+        if device_labeled:
+            asyncio.create_task(retrain_device_type_classifier())
 
         # Update user enrollment status
         user.enrollment_patterns = pattern_ids
@@ -322,7 +454,13 @@ async def authenticate_user(auth_request: AuthenticationRequest):
             feature_extractor.extract_features,
             auth_request.pattern.events,
             auth_request.pattern.text_typed,
+            auth_request.pattern.input_device_type,
         )
+
+        if auth_request.pattern.input_device_type:
+            auth_pattern.user_id = user.id
+            await patterns_collection.insert_one(auth_pattern.dict())
+            asyncio.create_task(retrain_device_type_classifier())
 
         # Authenticate using ML pipeline
         auth_result = await loop.run_in_executor(
@@ -331,6 +469,30 @@ async def authenticate_user(auth_request: AuthenticationRequest):
             user.id,
             auth_pattern.feature_vector,
         )
+
+        device_classification = await loop.run_in_executor(
+            executor,
+            ml_pipeline.classify_device_type,
+            auth_pattern.feature_vector,
+        )
+
+        predicted_device_type = None
+        device_type_confidence = None
+        device_type_probabilities = None
+
+        if device_classification:
+            predicted_label = device_classification.get("predicted_device_type")
+            if predicted_label is not None:
+                try:
+                    predicted_device_type = InputDeviceType(predicted_label)
+                except ValueError:
+                    predicted_device_type = None
+
+            device_type_confidence = device_classification.get("confidence")
+            raw_probabilities = device_classification.get("probabilities") or {}
+            device_type_probabilities = {
+                str(key): float(value) for key, value in raw_probabilities.items()
+            }
 
         # Calculate total processing time
         processing_time = (datetime.now() - start_time).total_seconds() * 1000
@@ -347,6 +509,8 @@ async def authenticate_user(auth_request: AuthenticationRequest):
             model_predictions=auth_result["model_predictions"],
             ensemble_score=auth_result["confidence"],
             threshold_used=auth_result["threshold_used"],
+            predicted_device_type=predicted_device_type,
+            reported_device_type=auth_request.pattern.input_device_type,
         )
 
         # Store attempt
@@ -358,6 +522,9 @@ async def authenticate_user(auth_request: AuthenticationRequest):
             confidence_score=auth_result["confidence"],
             processing_time_ms=processing_time,
             message=auth_result["reason"],
+            predicted_device_type=predicted_device_type,
+            device_type_confidence=device_type_confidence,
+            device_type_probabilities=device_type_probabilities,
         )
 
     except Exception as e:

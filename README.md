@@ -33,6 +33,8 @@ A behavioral biometric authentication system that uses keystroke timing patterns
 - **Behavioral Biometrics**: Analyzes typing rhythm, key hold times, and inter-keystroke intervals
 - **Modern UI**: Clean React interface with real-time feedback and professional design
 - **High Accuracy**: Advanced ML algorithms provide reliable authentication results
+- **Device Source Detection**: Classifies whether input came from the numeric keypad or top-row digits using the same ensemble models
+- **Dynamic Phrases**: Randomized enrollment and authentication phrases ensure richer keystroke feature collection
 
 ## 🔬 How It Works
 
@@ -108,7 +110,7 @@ npm start
 ## Authentication Workflow
 
 1. **Register** - Create a new user account
-2. **Enroll** - Provide 5 keystroke patterns for ML model training
+2. **Enroll** - Provide 5 keystroke patterns for ML model training (capture both top-row digits and numeric keypad samples for device classification)
 3. **Authenticate** - Verify identity using trained model
 
 ## API Endpoints
@@ -117,6 +119,7 @@ npm start
 - `POST /api/users` - Create new user
 - `POST /api/enroll` - Enroll user with keystroke patterns
 - `POST /api/authenticate` - Authenticate user
+- `POST /api/classify-device` - Predict whether a pattern was typed on the numpad or key row
 - `GET /api/users` - List all users
 - `GET /api/system/stats` - System statistics
 
