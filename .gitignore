@@ -1,2 +1,5 @@
 **/node_modules
 **/*.joblib
+**/build
+**/__pycache__
+**/*.pyc

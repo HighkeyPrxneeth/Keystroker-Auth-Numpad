@@ -1,12 +1,11 @@
-import React, { useState } from 'react';
-import apiService from '../services/api';
+import React, { useState } from "react";
+import apiService from "../services/api";
 
 const UserRegistration = ({ setCurrentUser }) => {
   const [formData, setFormData] = useState({
-    username: '',
-    email: '',
+    username: "",
   });
-  const [status, setStatus] = useState({ type: '', message: '' });
+  const [status, setStatus] = useState({ type: "", message: "" });
   const [loading, setLoading] = useState(false);
 
   const handleChange = (e) => {
@@ -19,26 +18,29 @@ const UserRegistration = ({ setCurrentUser }) => {
   const handleSubmit = async (e) => {
     e.preventDefault();
     setLoading(true);
-    setStatus({ type: '', message: '' });
+    setStatus({ type: "", message: "" });
 
     try {
       const userData = {
         username: formData.username,
-        email: formData.email,
+        email: `${formData.username}@keystroke.local`, // Auto-generate email
       };
 
       const response = await apiService.createUser(userData);
       setStatus({
-        type: 'success',
+        type: "success",
         message: `User registered successfully! User ID: ${response.id}`,
       });
       setCurrentUser(response);
-      setFormData({ username: '', email: '' });
+      setFormData({ username: "" });
     } catch (error) {
-      console.error('Registration error:', error);
+      console.error("Registration error:", error);
       setStatus({
-        type: 'error',
-        message: typeof error === 'string' ? error : error.message || 'Failed to register user',
+        type: "error",
+        message:
+          typeof error === "string"
+            ? error
+            : error.message || "Failed to register user",
       });
     } finally {
       setLoading(false);
@@ -70,25 +72,8 @@ const UserRegistration = ({ setCurrentUser }) => {
           />
         </div>
 
-        <div className="form-group">
-          <label htmlFor="email">Email Address</label>
-          <input
-            type="email"
-            id="email"
-            name="email"
-            value={formData.email}
-            onChange={handleChange}
-            required
-            placeholder="Enter your email address"
-          />
-        </div>
-
-        <button
-          type="submit"
-          className="btn"
-          disabled={loading}
-        >
-          {loading ? 'Registering...' : 'Register User'}
+        <button type="submit" className="btn" disabled={loading}>
+          {loading ? "Registering..." : "Register User"}
         </button>
       </form>
     </div>

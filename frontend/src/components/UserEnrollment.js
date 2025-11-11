@@ -5,7 +5,11 @@ import {
   INPUT_DEVICE_TYPES,
   getRandomPhrase,
   getDeviceTypeLabel,
+  getDeviceGuidance,
 } from "../constants/typingPhrases";
+
+const PATTERNS_PER_DEVICE = 3;
+const REQUIRED_PATTERNS = PATTERNS_PER_DEVICE * 2;
 
 const UserEnrollment = ({ currentUser, setCurrentUser }) => {
   const [users, setUsers] = useState([]);
@@ -13,9 +17,7 @@ const UserEnrollment = ({ currentUser, setCurrentUser }) => {
   const [inputDeviceType, setInputDeviceType] = useState(
     INPUT_DEVICE_TYPES.KEYROW
   );
-  const [testPhrase, setTestPhrase] = useState(
-    getRandomPhrase(INPUT_DEVICE_TYPES.KEYROW)
-  );
+  const [testPhrase, setTestPhrase] = useState(getRandomPhrase());
   const [typedText, setTypedText] = useState("");
   const [status, setStatus] = useState({ type: "", message: "" });
   const [loading, setLoading] = useState(false);
@@ -25,7 +27,6 @@ const UserEnrollment = ({ currentUser, setCurrentUser }) => {
     [INPUT_DEVICE_TYPES.KEYROW]: 0,
     [INPUT_DEVICE_TYPES.NUMPAD]: 0,
   });
-  const requiredPatterns = 5;
 
   const {
     keystrokeData,
@@ -37,58 +38,52 @@ const UserEnrollment = ({ currentUser, setCurrentUser }) => {
     getTypingPattern,
   } = useKeystrokeCapture();
 
-  useEffect(() => {
-    loadUsers();
-  }, []);
-
-  useEffect(() => {
-    if (currentUser) {
-      setSelectedUserId(currentUser.id);
-    }
-  }, [currentUser]);
-
-  const prepareForCapture = useCallback(
-    (deviceType, patternNumber = currentPatternNumber) => {
-      const nextPhrase = getRandomPhrase(deviceType, testPhrase);
-      setTestPhrase(nextPhrase);
-      setTypedText("");
-      startCapture();
-      setStatus({
-        type: "info",
-        message: `Recording pattern ${patternNumber}/${requiredPatterns} using ${getDeviceTypeLabel(
-          deviceType
-        )}. Type the phrase exactly as shown.`,
-      });
-    },
-    [currentPatternNumber, requiredPatterns, startCapture, testPhrase]
-  );
-
-  const handleDeviceTypeChange = (event) => {
-    const nextType = event.target.value;
-    setInputDeviceType(nextType);
-    setTypedText("");
-    setTestPhrase(getRandomPhrase(nextType));
-    stopCapture();
-    setStatus({
-      type: "info",
-      message: `Device target updated. Please click '${
-        enrollmentPatterns.length === 0
-          ? "Start Enrollment"
-          : "Start Next Pattern"
-      }' and type the ${getDeviceTypeLabel(nextType).toLowerCase()}.`,
-    });
-  };
-
-  const loadUsers = async () => {
+  const loadUsers = useCallback(async () => {
     try {
       const userList = await apiService.getAllUsers();
       setUsers(userList);
     } catch (error) {
       console.error("Failed to load users:", error);
     }
-  };
+  }, []);
+
+  useEffect(() => {
+    loadUsers();
+  }, [loadUsers]);
+
+  useEffect(() => {
+    if (currentUser) {
+      setSelectedUserId(currentUser.id);
+      loadUsers();
+    }
+  }, [currentUser, loadUsers]);
+
+  const getTargetDeviceForPattern = useCallback((patternNumber) => {
+    return patternNumber <= PATTERNS_PER_DEVICE
+      ? INPUT_DEVICE_TYPES.KEYROW
+      : INPUT_DEVICE_TYPES.NUMPAD;
+  }, []);
+
+  const prepareForCapture = useCallback(
+    (patternNumber = currentPatternNumber) => {
+      const deviceType = getTargetDeviceForPattern(patternNumber);
+      const guidance = getDeviceGuidance(deviceType);
+      setInputDeviceType(deviceType);
+      setTestPhrase((prev) => getRandomPhrase(prev.text || prev));
+      setTypedText("");
+      startCapture();
+      setStatus({
+        type: "info",
+        message: `Recording pattern ${patternNumber}/${REQUIRED_PATTERNS} using ${getDeviceTypeLabel(
+          deviceType
+        )}. ${guidance} Each digit must come from the correct section of the keyboard.`,
+      });
+    },
+    [currentPatternNumber, getTargetDeviceForPattern, startCapture]
+  );
 
   const handleStartEnrollment = () => {
+    stopCapture();
     setTypedText("");
     setStatus({ type: "", message: "" });
     setEnrollmentPatterns([]);
@@ -97,7 +92,7 @@ const UserEnrollment = ({ currentUser, setCurrentUser }) => {
       [INPUT_DEVICE_TYPES.KEYROW]: 0,
       [INPUT_DEVICE_TYPES.NUMPAD]: 0,
     });
-    prepareForCapture(inputDeviceType, 1);
+    prepareForCapture(1);
   };
 
   const handleTextChange = (e) => {
@@ -105,7 +100,9 @@ const UserEnrollment = ({ currentUser, setCurrentUser }) => {
     setTypedText(value);
 
     // Check if user completed the phrase
-    if (value === testPhrase && isCapturing) {
+    const targetText =
+      typeof testPhrase === "string" ? testPhrase : testPhrase.text;
+    if (value === targetText && isCapturing) {
       stopCapture();
       setStatus({
         type: "info",
@@ -113,6 +110,36 @@ const UserEnrollment = ({ currentUser, setCurrentUser }) => {
       });
     }
   };
+
+  const handleKeyDownWithValidation = useCallback(
+    (event) => {
+      if (!isCapturing) {
+        return;
+      }
+
+      const isDigitKey = event.key.length === 1 && /[0-9]/.test(event.key);
+      if (isDigitKey) {
+        const isNumpadEvent = event.location === 3;
+        const usingTopRow = inputDeviceType === INPUT_DEVICE_TYPES.KEYROW;
+        const usingNumpad = inputDeviceType === INPUT_DEVICE_TYPES.NUMPAD;
+
+        if ((usingTopRow && isNumpadEvent) || (usingNumpad && !isNumpadEvent)) {
+          event.preventDefault();
+          event.stopPropagation();
+          setStatus({
+            type: "error",
+            message: usingTopRow
+              ? "❌ Use the digits above the letters (0-9 keys in the top row); the numpad is disabled for this pattern."
+              : "❌ Use the numeric keypad on the right side; the top-row digits are disabled for this pattern.",
+          });
+          return;
+        }
+      }
+
+      handleKeyDown(event);
+    },
+    [handleKeyDown, inputDeviceType, isCapturing]
+  );
 
   const handleSubmitPattern = async () => {
     if (!selectedUserId) {
@@ -154,7 +181,7 @@ const UserEnrollment = ({ currentUser, setCurrentUser }) => {
         });
       });
 
-      // Store the pattern locally
+      // Store the pattern locally with device type
       const patternData = {
         text_typed: typedText,
         events: events,
@@ -168,22 +195,27 @@ const UserEnrollment = ({ currentUser, setCurrentUser }) => {
         ...prev,
         [inputDeviceType]: prev[inputDeviceType] + 1,
       }));
-      setCurrentPatternNumber(newPatternCount + 1);
+      const nextPatternNumber = newPatternCount + 1;
+      setCurrentPatternNumber(nextPatternNumber);
 
       // Reset for next pattern
       setTypedText("");
 
-      if (newPatternCount >= requiredPatterns) {
+      if (newPatternCount >= REQUIRED_PATTERNS) {
         setStatus({
           type: "success",
-          message: `Pattern ${newPatternCount}/${requiredPatterns} captured! You can now complete enrollment.`,
+          message: `Pattern ${newPatternCount}/${REQUIRED_PATTERNS} captured! You can now complete enrollment.`,
         });
       } else {
+        const nextDeviceType = getTargetDeviceForPattern(nextPatternNumber);
+        setInputDeviceType(nextDeviceType);
         setStatus({
           type: "info",
-          message: `Pattern ${newPatternCount}/${requiredPatterns} captured for ${getDeviceTypeLabel(
-            inputDeviceType
-          ).toLowerCase()}. Choose the next device type and click "Start Next Pattern" to continue.`,
+          message: `Pattern ${newPatternCount}/${REQUIRED_PATTERNS} captured. Next: ${getDeviceTypeLabel(
+            nextDeviceType
+          )}. ${getDeviceGuidance(
+            nextDeviceType
+          )} Click "Start Next Pattern" to continue.`,
         });
       }
     } catch (error) {
@@ -196,26 +228,26 @@ const UserEnrollment = ({ currentUser, setCurrentUser }) => {
 
   const handleStartNextPattern = () => {
     setTypedText("");
-    prepareForCapture(inputDeviceType, currentPatternNumber);
+    stopCapture();
+    prepareForCapture(currentPatternNumber);
   };
 
   const handleCompleteEnrollment = async () => {
-    if (enrollmentPatterns.length < requiredPatterns) {
+    if (enrollmentPatterns.length < REQUIRED_PATTERNS) {
       setStatus({
         type: "error",
-        message: `Need ${requiredPatterns} patterns for enrollment. You have ${enrollmentPatterns.length}.`,
+        message: `Need ${REQUIRED_PATTERNS} patterns for enrollment. You have ${enrollmentPatterns.length}.`,
       });
       return;
     }
 
     if (
-      deviceTypeCounts[INPUT_DEVICE_TYPES.KEYROW] === 0 ||
-      deviceTypeCounts[INPUT_DEVICE_TYPES.NUMPAD] === 0
+      deviceTypeCounts[INPUT_DEVICE_TYPES.KEYROW] !== PATTERNS_PER_DEVICE ||
+      deviceTypeCounts[INPUT_DEVICE_TYPES.NUMPAD] !== PATTERNS_PER_DEVICE
     ) {
       setStatus({
         type: "error",
-        message:
-          "Please record at least one pattern using both the top-row numbers and the numeric keypad to train the device classifier.",
+        message: `Collect exactly ${PATTERNS_PER_DEVICE} patterns with the top-row numbers and ${PATTERNS_PER_DEVICE} with the numeric keypad before completing enrollment.`,
       });
       return;
     }
@@ -257,6 +289,7 @@ const UserEnrollment = ({ currentUser, setCurrentUser }) => {
       setEnrollmentPatterns([]);
       setCurrentPatternNumber(1);
       setTypedText("");
+      setInputDeviceType(INPUT_DEVICE_TYPES.KEYROW);
     } catch (error) {
       setStatus({
         type: "error",
@@ -296,43 +329,41 @@ const UserEnrollment = ({ currentUser, setCurrentUser }) => {
           <option value="">Choose a user...</option>
           {users.map((user) => (
             <option key={user.id} value={user.id}>
-              {user.username} ({user.email})
+              {user.username}
             </option>
           ))}
         </select>
       </div>
 
       <div className="form-group">
-        <label>Input Device Target</label>
-        <div style={{ display: "flex", gap: "1rem" }}>
-          <label
-            style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}
-          >
-            <input
-              type="radio"
-              name="inputDeviceType"
-              value={INPUT_DEVICE_TYPES.KEYROW}
-              checked={inputDeviceType === INPUT_DEVICE_TYPES.KEYROW}
-              onChange={handleDeviceTypeChange}
-            />
-            Top-row number keys
-          </label>
-          <label
-            style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}
-          >
-            <input
-              type="radio"
-              name="inputDeviceType"
-              value={INPUT_DEVICE_TYPES.NUMPAD}
-              checked={inputDeviceType === INPUT_DEVICE_TYPES.NUMPAD}
-              onChange={handleDeviceTypeChange}
-            />
-            Numeric keypad
-          </label>
+        <label>Current Input Device Required</label>
+        <div
+          style={{
+            padding: "1rem",
+            backgroundColor:
+              inputDeviceType === INPUT_DEVICE_TYPES.NUMPAD
+                ? "#e3f2fd"
+                : "#fff3e0",
+            borderRadius: "8px",
+            border:
+              "3px solid " +
+              (inputDeviceType === INPUT_DEVICE_TYPES.NUMPAD
+                ? "#2196f3"
+                : "#ff9800"),
+            fontWeight: "bold",
+            textAlign: "center",
+            fontSize: "1.1rem",
+          }}
+        >
+          {inputDeviceType === INPUT_DEVICE_TYPES.NUMPAD
+            ? "📱 USE NUMERIC KEYPAD ONLY"
+            : "⌨️ USE TOP-ROW NUMBERS ONLY"}
         </div>
-        <small style={{ color: "#4a5568" }}>
-          Capture patterns from both device types to help the classifier
-          distinguish input sources.
+        <small
+          style={{ color: "#4a5568", display: "block", marginTop: "0.5rem" }}
+        >
+          {getDeviceGuidance(inputDeviceType)} First {PATTERNS_PER_DEVICE}{" "}
+          patterns require top-row, next {PATTERNS_PER_DEVICE} require numpad.
         </small>
       </div>
 
@@ -341,10 +372,22 @@ const UserEnrollment = ({ currentUser, setCurrentUser }) => {
         <input
           type="text"
           id="testPhrase"
-          value={testPhrase}
+          value={typeof testPhrase === "string" ? testPhrase : testPhrase.text}
           readOnly
           placeholder="Enrollment phrase will randomize for each capture"
         />
+        {testPhrase.source && (
+          <small
+            style={{
+              color: "#6b7280",
+              fontStyle: "italic",
+              display: "block",
+              marginTop: "0.25rem",
+            }}
+          >
+            Source: {testPhrase.source}
+          </small>
+        )}
         <button
           type="button"
           className="btn btn-secondary"
@@ -352,11 +395,14 @@ const UserEnrollment = ({ currentUser, setCurrentUser }) => {
           onClick={() => {
             stopCapture();
             setTypedText("");
-            setTestPhrase(getRandomPhrase(inputDeviceType, testPhrase));
+            const currentText =
+              typeof testPhrase === "string" ? testPhrase : testPhrase.text;
+            setTestPhrase(getRandomPhrase(currentText));
             setStatus({
               type: "info",
-              message:
-                "Phrase updated. Restart recording to capture a new pattern.",
+              message: `Phrase updated. Use ${getDeviceTypeLabel(
+                inputDeviceType
+              ).toLowerCase()}. ${getDeviceGuidance(inputDeviceType)}`,
             });
           }}
         >
@@ -371,38 +417,46 @@ const UserEnrollment = ({ currentUser, setCurrentUser }) => {
           className="typing-area"
           value={typedText}
           onChange={handleTextChange}
-          onKeyDown={handleKeyDown}
+          onKeyDown={handleKeyDownWithValidation}
           onKeyUp={handleKeyUp}
           placeholder="Click 'Start Enrollment' or 'Start Next Pattern' then type the phrase above..."
           disabled={!isCapturing}
+          onPaste={(e) => e.preventDefault()}
         />
       </div>
 
       <div style={{ marginBottom: "1rem" }}>
         <p>
-          <strong>Target:</strong> {testPhrase}
+          <strong>Target:</strong>{" "}
+          {typeof testPhrase === "string" ? testPhrase : testPhrase.text}
         </p>
         <p>
           <strong>Typed:</strong> {typedText}
         </p>
         <p>
-          <strong>Progress:</strong> {typedText.length}/{testPhrase.length}{" "}
+          <strong>Progress:</strong> {typedText.length}/
+          {typeof testPhrase === "string"
+            ? testPhrase.length
+            : testPhrase.text.length}{" "}
           characters
         </p>
         <p>
           <strong>Patterns Collected:</strong> {enrollmentPatterns.length}/
-          {requiredPatterns}
+          {REQUIRED_PATTERNS}
         </p>
         <p>
-          <strong>Device Coverage:</strong> Top row{" "}
-          {deviceTypeCounts[INPUT_DEVICE_TYPES.KEYROW]} / Numpad{" "}
-          {deviceTypeCounts[INPUT_DEVICE_TYPES.NUMPAD]}
+          <strong>Device Coverage:</strong> Top-row{" "}
+          {deviceTypeCounts[INPUT_DEVICE_TYPES.KEYROW]}/{PATTERNS_PER_DEVICE} |
+          Numpad {deviceTypeCounts[INPUT_DEVICE_TYPES.NUMPAD]}/
+          {PATTERNS_PER_DEVICE}
         </p>
-        {typedText === testPhrase && typedText.length > 0 && (
-          <p style={{ color: "green", fontWeight: "bold" }}>
-            ✓ Phrase completed!
-          </p>
-        )}
+        {typedText ===
+          (typeof testPhrase === "string" ? testPhrase : testPhrase.text) &&
+          typedText.length > 0 && (
+            <p style={{ color: "green", fontWeight: "bold" }}>
+              ✓ Phrase completed!
+            </p>
+          )}
       </div>
 
       <div>
@@ -419,7 +473,7 @@ const UserEnrollment = ({ currentUser, setCurrentUser }) => {
             className="btn"
             onClick={handleStartNextPattern}
             disabled={
-              isCapturing || enrollmentPatterns.length >= requiredPatterns
+              isCapturing || enrollmentPatterns.length >= REQUIRED_PATTERNS
             }
           >
             Start Next Pattern
@@ -445,7 +499,7 @@ const UserEnrollment = ({ currentUser, setCurrentUser }) => {
         <button
           className="btn btn-primary"
           onClick={handleCompleteEnrollment}
-          disabled={loading || enrollmentPatterns.length < requiredPatterns}
+          disabled={loading || enrollmentPatterns.length < REQUIRED_PATTERNS}
         >
           {loading ? "Enrolling..." : "Complete Enrollment"}
         </button>
@@ -464,13 +518,13 @@ const UserEnrollment = ({ currentUser, setCurrentUser }) => {
             </div>
             <div className="stat-card">
               <div className="stat-value">
-                {requiredPatterns - enrollmentPatterns.length}
+                {REQUIRED_PATTERNS - enrollmentPatterns.length}
               </div>
               <div className="stat-label">Patterns Remaining</div>
             </div>
             <div className="stat-card">
               <div className="stat-value">
-                {enrollmentPatterns.length >= requiredPatterns ? "✓" : "○"}
+                {enrollmentPatterns.length >= REQUIRED_PATTERNS ? "✓" : "○"}
               </div>
               <div className="stat-label">Ready to Enroll</div>
             </div>

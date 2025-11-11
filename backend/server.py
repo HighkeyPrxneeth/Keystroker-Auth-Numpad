@@ -4,7 +4,7 @@ import os
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
-from typing import List
+from typing import List, Optional, Union
 
 from dotenv import load_dotenv
 from fastapi import APIRouter, BackgroundTasks, FastAPI, HTTPException
@@ -17,10 +17,12 @@ from models import (
     AuthenticationRequest,
     AuthenticationResponse,
     AuthenticationStatus,
+    DeviceClassificationResponse,
     EnrollmentRequest,
     EnrollmentResponse,
     InputDeviceType,
     KeystrokeDataInput,
+    KeystrokeEvent,
     KeystrokePattern,
     User,
     UserCreate,
@@ -65,6 +67,7 @@ async def retrain_device_type_classifier():
     """Retrain the global classifier that differentiates numpad vs key-row input."""
 
     async with device_type_training_lock:
+        loop = asyncio.get_event_loop()
         cursor = patterns_collection.find(
             {
                 "input_device_type": {
@@ -81,11 +84,51 @@ async def retrain_device_type_classifier():
         labels = []
 
         for doc in pattern_docs:
-            feature_vector = doc.get("feature_vector")
-            device_type = doc.get("input_device_type")
-            if feature_vector and device_type:
-                feature_vectors.append(feature_vector)
-                labels.append(device_type)
+            device_type = _coerce_input_device_type(doc.get("input_device_type"))
+            raw_events = doc.get("raw_events") or []
+            if not device_type or not raw_events:
+                continue
+
+            try:
+                events = [KeystrokeEvent(**event) for event in raw_events]
+            except Exception as exc:
+                logger.error(
+                    "Failed to rebuild events for pattern %s: %s",
+                    str(doc.get("_id")),
+                    exc,
+                )
+                continue
+
+            pattern = await loop.run_in_executor(
+                executor,
+                feature_extractor.extract_features,
+                events,
+                doc.get("text_typed", ""),
+                device_type,
+            )
+
+            feature_vectors.append(pattern.feature_vector)
+            labels.append(device_type.value)
+
+            try:
+                await patterns_collection.update_one(
+                    {"_id": doc["_id"]},
+                    {
+                        "$set": {
+                            "feature_vector": pattern.feature_vector,
+                            "feature_names": pattern.feature_names,
+                            "typing_speed": pattern.typing_speed,
+                            "total_typing_time": pattern.total_typing_time,
+                            "rhythm_variance": pattern.rhythm_variance,
+                        }
+                    },
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Failed to update cached features for pattern %s: %s",
+                    str(doc.get("_id")),
+                    exc,
+                )
 
         if len(feature_vectors) < 4 or len(set(labels)) < 2:
             logger.info(
@@ -94,8 +137,6 @@ async def retrain_device_type_classifier():
                 len(set(labels)),
             )
             return None
-
-        loop = asyncio.get_event_loop()
 
         try:
             result = await loop.run_in_executor(
@@ -112,6 +153,162 @@ async def retrain_device_type_classifier():
         except Exception as exc:
             logger.error(f"Device type training failed: {exc}")
             return None
+
+
+def _coerce_input_device_type(
+    value: Optional[Union[InputDeviceType, str]],
+) -> Optional[InputDeviceType]:
+    """Safely convert stored device type values into the enum."""
+
+    if value is None:
+        return None
+
+    if isinstance(value, InputDeviceType):
+        return value
+
+    try:
+        return InputDeviceType(value)
+    except (ValueError, TypeError):
+        return None
+
+
+async def _rebuild_pattern_features(
+    pattern_doc: dict, loop: asyncio.AbstractEventLoop
+) -> Optional[KeystrokePattern]:
+    """Recompute feature vector for a stored pattern from raw events and persist cache."""
+
+    raw_events = pattern_doc.get("raw_events") or []
+    if not raw_events:
+        return None
+
+    try:
+        events = [KeystrokeEvent(**event) for event in raw_events]
+    except Exception as exc:
+        logger.error(
+            "Failed to rebuild events for pattern %s: %s",
+            str(pattern_doc.get("_id")),
+            exc,
+        )
+        return None
+
+    device_type = _coerce_input_device_type(pattern_doc.get("input_device_type"))
+
+    pattern = await loop.run_in_executor(
+        executor,
+        feature_extractor.extract_features,
+        events,
+        pattern_doc.get("text_typed", ""),
+        device_type,
+    )
+
+    pattern.user_id = pattern_doc.get("user_id", "")
+
+    try:
+        await patterns_collection.update_one(
+            {"_id": pattern_doc["_id"]},
+            {
+                "$set": {
+                    "feature_vector": pattern.feature_vector,
+                    "feature_names": pattern.feature_names,
+                    "typing_speed": pattern.typing_speed,
+                    "total_typing_time": pattern.total_typing_time,
+                    "rhythm_variance": pattern.rhythm_variance,
+                    "input_device_type": pattern.input_device_type.value
+                    if isinstance(pattern.input_device_type, InputDeviceType)
+                    else pattern_doc.get("input_device_type"),
+                }
+            },
+        )
+    except Exception as exc:
+        logger.warning(
+            "Failed to update cached features for pattern %s: %s",
+            str(pattern_doc.get("_id")),
+            exc,
+        )
+
+    return pattern
+
+
+async def retrain_user_authentication_model(
+    user: User, imposter_multiplier: int = 3
+) -> Optional[dict]:
+    """Rebuild cached features and retrain a user's authentication model."""
+
+    loop = asyncio.get_event_loop()
+
+    user_patterns = await patterns_collection.find({"user_id": user.id}).to_list(
+        length=None
+    )
+
+    positive_patterns: List[KeystrokePattern] = []
+    for doc in user_patterns:
+        rebuilt_pattern = await _rebuild_pattern_features(doc, loop)
+        if rebuilt_pattern is not None:
+            positive_patterns.append(rebuilt_pattern)
+
+    if len(positive_patterns) < 3:
+        logger.warning(
+            "Unable to retrain user %s: only %d valid positive patterns",
+            user.id,
+            len(positive_patterns),
+        )
+        return None
+
+    imposter_limit = max(len(positive_patterns) * imposter_multiplier, 10)
+    imposter_cursor = patterns_collection.find({"user_id": {"$ne": user.id}}).limit(
+        imposter_limit
+    )
+    imposter_docs = await imposter_cursor.to_list(length=None)
+
+    imposter_patterns: List[KeystrokePattern] = []
+    for doc in imposter_docs:
+        rebuilt_pattern = await _rebuild_pattern_features(doc, loop)
+        if rebuilt_pattern is not None:
+            imposter_patterns.append(rebuilt_pattern)
+
+    if not imposter_patterns:
+        logger.warning(
+            "Unable to retrain user %s: no valid imposter patterns available",
+            user.id,
+        )
+        return None
+
+    feature_vectors: List[List[float]] = [
+        pattern.feature_vector for pattern in positive_patterns
+    ]
+    labels: List[str] = [user.id] * len(positive_patterns)
+
+    feature_vectors.extend(pattern.feature_vector for pattern in imposter_patterns)
+    labels.extend(["imposter"] * len(imposter_patterns))
+
+    if len(feature_vectors) < 5:
+        logger.warning(
+            "Unable to retrain user %s: only %d total samples after rebuild",
+            user.id,
+            len(feature_vectors),
+        )
+        return None
+
+    try:
+        training_result = await loop.run_in_executor(
+            executor,
+            ml_pipeline.train_user_model,
+            user.id,
+            feature_vectors,
+            labels,
+        )
+        logger.info(
+            "Retrained authentication model for user %s with %d positives and %d imposters",
+            user.id,
+            len(positive_patterns),
+            len(imposter_patterns),
+        )
+        return training_result
+    except Exception as exc:
+        logger.error(
+            "Failed to retrain authentication model for user %s: %s", user.id, exc
+        )
+        return None
 
 
 # Basic health check routes
@@ -203,6 +400,8 @@ async def list_users(skip: int = 0, limit: int = 100):
             )
         )
 
+    return users
+
 
 @api_router.post("/classify-device", response_model=DeviceClassificationResponse)
 async def classify_input_device(pattern: KeystrokeDataInput):
@@ -255,8 +454,6 @@ async def classify_input_device(pattern: KeystrokeDataInput):
         model_used=model_used,
         probabilities={str(key): float(value) for key, value in probabilities.items()},
     )
-
-    return users
 
 
 # Keystroke pattern collection and processing
@@ -375,21 +572,31 @@ async def enroll_user(enrollment_data: EnrollmentRequest):
             )
 
         # Generate negative samples (imposter data) by using other users' patterns
-        imposter_patterns = (
+        imposter_docs = (
             await patterns_collection.find({"user_id": {"$ne": user.id}})
             .limit(len(feature_vectors) * 2)
             .to_list(None)
         )
+
+        imposter_features: List[List[float]] = []
+        for imp_pattern_data in imposter_docs:
+            rebuilt = await _rebuild_pattern_features(imp_pattern_data, loop)
+            if rebuilt is not None:
+                imposter_features.append(rebuilt.feature_vector)
 
         # Prepare training data
         all_features = feature_vectors.copy()
         labels = [user.id] * len(feature_vectors)  # Positive samples
 
         # Add imposter samples
-        for imp_pattern_data in imposter_patterns:
-            imp_pattern = KeystrokePattern(**imp_pattern_data)
-            all_features.append(imp_pattern.feature_vector)
-            labels.append("imposter")
+        if imposter_features:
+            all_features.extend(imposter_features)
+            labels.extend(["imposter"] * len(imposter_features))
+        else:
+            logger.warning(
+                "Enrollment for user %s proceeding without imposter examples; model quality may suffer",
+                user.id,
+            )
 
         # Train ML model
         training_result = await loop.run_in_executor(
@@ -462,13 +669,41 @@ async def authenticate_user(auth_request: AuthenticationRequest):
             await patterns_collection.insert_one(auth_pattern.dict())
             asyncio.create_task(retrain_device_type_classifier())
 
-        # Authenticate using ML pipeline
-        auth_result = await loop.run_in_executor(
-            executor,
-            ml_pipeline.authenticate_user,
-            user.id,
-            auth_pattern.feature_vector,
-        )
+        # Authenticate using ML pipeline, retraining on-the-fly if cache is stale
+        try:
+            auth_result = await loop.run_in_executor(
+                executor,
+                ml_pipeline.authenticate_user,
+                user.id,
+                auth_pattern.feature_vector,
+            )
+        except ValueError as exc:
+            error_message = str(exc)
+            if "StandardScaler" in error_message and "features" in error_message:
+                logger.warning(
+                    "Feature mismatch detected for user %s (message=%s). Triggering model retrain.",
+                    user.id,
+                    error_message,
+                )
+
+                retrain_result = await retrain_user_authentication_model(user)
+                if not retrain_result:
+                    raise HTTPException(
+                        status_code=500,
+                        detail=(
+                            "User model is out of date and could not be retrained automatically. "
+                            "Please re-enroll the user or add more data."
+                        ),
+                    )
+
+                auth_result = await loop.run_in_executor(
+                    executor,
+                    ml_pipeline.authenticate_user,
+                    user.id,
+                    auth_pattern.feature_vector,
+                )
+            else:
+                raise
 
         device_classification = await loop.run_in_executor(
             executor,
@@ -527,6 +762,8 @@ async def authenticate_user(auth_request: AuthenticationRequest):
             device_type_probabilities=device_type_probabilities,
         )
 
+    except HTTPException as exc:
+        raise exc
     except Exception as e:
         logger.error(f"Error during authentication: {e}")
         raise HTTPException(status_code=500, detail=f"Authentication failed: {str(e)}")
@@ -637,10 +874,44 @@ async def get_system_stats():
 # Include the router in the main app
 app.include_router(api_router)
 
+
+def _resolve_cors_configuration() -> dict:
+    origins_env = os.environ.get("CORS_ORIGINS", "").strip()
+    if origins_env:
+        parsed_origins = [
+            origin.strip() for origin in origins_env.split(",") if origin.strip()
+        ]
+    else:
+        parsed_origins = [
+            "http://localhost:3000",
+            "http://127.0.0.1:3000",
+            "http://localhost:5173",
+            "http://127.0.0.1:5173",
+            "https://localhost:3000",
+            "https://127.0.0.1:3000",
+            "https://localhost:5173",
+            "https://127.0.0.1:5173",
+        ]
+
+    allow_origin_regex = None
+    if any(origin == "*" for origin in parsed_origins):
+        allow_origin_regex = ".*"
+        parsed_origins = [origin for origin in parsed_origins if origin != "*"]
+    else:
+        allow_origin_regex = r"https?://(localhost|127\.0\.0\.1)(:\d+)?"
+
+    return {
+        "allow_origins": parsed_origins,
+        "allow_origin_regex": allow_origin_regex,
+    }
+
+
+cors_config = _resolve_cors_configuration()
 app.add_middleware(
     CORSMiddleware,
     allow_credentials=True,
-    allow_origins=os.environ.get("CORS_ORIGINS", "*").split(","),
+    allow_origins=cors_config["allow_origins"],
+    allow_origin_regex=cors_config["allow_origin_regex"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -650,6 +921,12 @@ logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
+
+logger.info(
+    "Configured CORS: allow_origins=%s, allow_origin_regex=%s",
+    cors_config["allow_origins"],
+    cors_config["allow_origin_regex"],
+)
 
 
 @app.on_event("shutdown")

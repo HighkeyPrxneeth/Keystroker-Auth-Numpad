@@ -11,6 +11,7 @@ from sklearn.ensemble import (
     RandomForestClassifier,
     VotingClassifier,
 )
+from sklearn.linear_model import LogisticRegression
 from sklearn.model_selection import GridSearchCV, StratifiedKFold, cross_val_score
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.preprocessing import LabelEncoder, StandardScaler
@@ -113,6 +114,30 @@ class KeystrokeMLPipeline:
 
         # Encode labels (user_id = 1, imposter = 0)
         y_binary = np.array([1 if label == user_id else 0 for label in labels])
+
+        # Check if we have only one class (no imposter samples)
+        unique_classes = np.unique(y_binary)
+        if len(unique_classes) == 1:
+            logger.warning(
+                f"Only one class detected. Generating synthetic imposter samples for user {user_id}"
+            )
+            # Generate synthetic imposter samples by adding noise to legitimate samples
+            n_imposters = len(X)  # Generate equal number of imposter samples
+            noise_level = 0.3  # 30% noise
+
+            # Add random noise to create synthetic imposters
+            np.random.seed(42)
+            synthetic_imposters = X + np.random.normal(
+                0, noise_level * np.std(X, axis=0), X.shape
+            )
+
+            # Combine with original data
+            X = np.vstack([X, synthetic_imposters])
+            y_binary = np.hstack([y_binary, np.zeros(n_imposters, dtype=int)])
+
+            logger.info(
+                f"Added {n_imposters} synthetic imposter samples. Total samples: {len(X)}"
+            )
 
         # Apply SMOTE for data balancing with adaptive k_neighbors
         n_samples = len(X)
@@ -447,16 +472,48 @@ class KeystrokeMLPipeline:
         model_scores: Dict[str, Dict[str, Any]] = {}
         trained_models: Dict[str, Any] = {}
 
-        for model_name, model in self.models.items():
+        max_neighbors = max(1, len(X_scaled) - 1)
+        knn_neighbors = max(1, min(5, max_neighbors))
+
+        device_models = {
+            "svm": SVC(
+                kernel="rbf",
+                C=2.0,
+                gamma="scale",
+                probability=True,
+                class_weight="balanced",
+                random_state=42,
+            ),
+            "random_forest": RandomForestClassifier(
+                n_estimators=200,
+                max_depth=None,
+                min_samples_split=2,
+                min_samples_leaf=1,
+                class_weight="balanced",
+                random_state=42,
+                n_jobs=-1,
+            ),
+            "knn": KNeighborsClassifier(
+                n_neighbors=knn_neighbors,
+                weights="distance",
+                metric="manhattan",
+            ),
+            "gradient_boosting": GradientBoostingClassifier(
+                n_estimators=200,
+                learning_rate=0.05,
+                max_depth=3,
+                random_state=42,
+            ),
+            "logistic_regression": LogisticRegression(
+                max_iter=2000,
+                class_weight="balanced",
+                solver="lbfgs",
+            ),
+        }
+
+        for model_name, model in device_models.items():
             try:
                 model_clone = model.__class__(**model.get_params())
-
-                if model_name == "knn":
-                    n_neighbors = model_clone.get_params()["n_neighbors"]
-                    max_neighbors = len(X_scaled) - 1
-                    if max_neighbors >= 1 and n_neighbors > max_neighbors:
-                        model_clone.set_params(n_neighbors=max(1, max_neighbors))
-
                 model_clone.fit(X_scaled, y_encoded)
 
                 if use_cross_validation and cv is not None:

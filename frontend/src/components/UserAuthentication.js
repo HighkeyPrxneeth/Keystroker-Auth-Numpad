@@ -1,27 +1,25 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useCallback } from "react";
 import { useKeystrokeCapture } from "../hooks/useKeystrokeCapture";
 import apiService from "../services/api";
 import {
-  INPUT_DEVICE_TYPES,
-  getRandomPhrase,
+  getRandomAuthenticationPhrase,
   getDeviceTypeLabel,
 } from "../constants/typingPhrases";
 
 const UserAuthentication = () => {
   const [users, setUsers] = useState([]);
   const [selectedUserId, setSelectedUserId] = useState("");
-  const [inputDeviceType, setInputDeviceType] = useState(
-    INPUT_DEVICE_TYPES.KEYROW
-  );
-  const [testPhrase, setTestPhrase] = useState(
-    getRandomPhrase(INPUT_DEVICE_TYPES.KEYROW)
+  const DEVICE_GUIDANCE_MESSAGE =
+    "Use whichever numeric keys you naturally prefer (top-row or numpad); the system will infer the device type automatically.";
+
+  const [testPhrase, setTestPhrase] = useState(() =>
+    getRandomAuthenticationPhrase()
   );
   const [typedText, setTypedText] = useState("");
   const [status, setStatus] = useState({ type: "", message: "" });
   const [loading, setLoading] = useState(false);
   const [authResult, setAuthResult] = useState(null);
   const [deviceClassification, setDeviceClassification] = useState(null);
-  const [lastAttemptDeviceType, setLastAttemptDeviceType] = useState(null);
 
   const {
     keystrokeData,
@@ -47,32 +45,18 @@ const UserAuthentication = () => {
   };
 
   const handleStartAuth = () => {
+    const currentText =
+      typeof testPhrase === "string" ? testPhrase : testPhrase.text;
+    const nextPhrase = getRandomAuthenticationPhrase(currentText);
     setTypedText("");
     setStatus({ type: "", message: "" });
     setAuthResult(null);
     setDeviceClassification(null);
-    setLastAttemptDeviceType(null);
-    setTestPhrase(getRandomPhrase(inputDeviceType));
+    setTestPhrase(nextPhrase);
     startCapture();
     setStatus({
       type: "info",
-      message: `Recording keystroke pattern using ${getDeviceTypeLabel(
-        inputDeviceType
-      )}. Type the phrase exactly as shown.`,
-    });
-  };
-
-  const handleDeviceTypeChange = (event) => {
-    const nextType = event.target.value;
-    setInputDeviceType(nextType);
-    setTypedText("");
-    setTestPhrase(getRandomPhrase(nextType));
-    stopCapture();
-    setStatus({
-      type: "info",
-      message: `Device target updated. Click 'Start Authentication' and use the ${getDeviceTypeLabel(
-        nextType
-      ).toLowerCase()}.`,
+      message: `${DEVICE_GUIDANCE_MESSAGE} Type every digit exactly as displayed.`,
     });
   };
 
@@ -81,7 +65,9 @@ const UserAuthentication = () => {
     setTypedText(value);
 
     // Check if user completed the phrase
-    if (value === testPhrase && isCapturing) {
+    const targetText =
+      typeof testPhrase === "string" ? testPhrase : testPhrase.text;
+    if (value === targetText && isCapturing) {
       stopCapture();
       setStatus({
         type: "info",
@@ -89,6 +75,17 @@ const UserAuthentication = () => {
       });
     }
   };
+
+  const handleKeyDownWithValidation = useCallback(
+    (event) => {
+      if (!isCapturing) {
+        return;
+      }
+
+      handleKeyDown(event);
+    },
+    [handleKeyDown, isCapturing]
+  );
 
   const handleAuthenticate = async () => {
     if (!selectedUserId) {
@@ -144,13 +141,11 @@ const UserAuthentication = () => {
         });
       });
 
-      const attemptDeviceType = inputDeviceType;
       const authData = {
         username: selectedUser.username,
         pattern: {
           text_typed: typedText,
           events: events,
-          input_device_type: attemptDeviceType,
         },
       };
 
@@ -163,7 +158,6 @@ const UserAuthentication = () => {
             ? result.device_type_confidence
             : null,
       });
-      setLastAttemptDeviceType(attemptDeviceType);
 
       // The backend returns status: "success" or "failed" and confidence_score
       const isAuthenticated = result.status === "success";
@@ -242,44 +236,10 @@ const UserAuthentication = () => {
           <option value="">Choose a user...</option>
           {users.map((user) => (
             <option key={user.id} value={user.id}>
-              {user.username} ({user.email})
+              {user.username}
             </option>
           ))}
         </select>
-      </div>
-
-      <div className="form-group">
-        <label>Input Device Target</label>
-        <div style={{ display: "flex", gap: "1rem" }}>
-          <label
-            style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}
-          >
-            <input
-              type="radio"
-              name="authDeviceType"
-              value={INPUT_DEVICE_TYPES.KEYROW}
-              checked={inputDeviceType === INPUT_DEVICE_TYPES.KEYROW}
-              onChange={handleDeviceTypeChange}
-            />
-            Top-row number keys
-          </label>
-          <label
-            style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}
-          >
-            <input
-              type="radio"
-              name="authDeviceType"
-              value={INPUT_DEVICE_TYPES.NUMPAD}
-              checked={inputDeviceType === INPUT_DEVICE_TYPES.NUMPAD}
-              onChange={handleDeviceTypeChange}
-            />
-            Numeric keypad
-          </label>
-        </div>
-        <small style={{ color: "#4a5568" }}>
-          Select the device you will use so the classifier can learn from both
-          input sources.
-        </small>
       </div>
 
       <div className="form-group">
@@ -287,10 +247,22 @@ const UserAuthentication = () => {
         <input
           type="text"
           id="testPhrase"
-          value={testPhrase}
+          value={typeof testPhrase === "string" ? testPhrase : testPhrase.text}
           readOnly
           placeholder="Authentication phrase will randomize for each attempt"
         />
+        {testPhrase.source && (
+          <small
+            style={{
+              color: "#6b7280",
+              fontStyle: "italic",
+              display: "block",
+              marginTop: "0.25rem",
+            }}
+          >
+            Source: {testPhrase.source}
+          </small>
+        )}
         <button
           type="button"
           className="btn btn-secondary"
@@ -298,11 +270,12 @@ const UserAuthentication = () => {
           onClick={() => {
             stopCapture();
             setTypedText("");
-            setTestPhrase(getRandomPhrase(inputDeviceType, testPhrase));
+            const currentText =
+              typeof testPhrase === "string" ? testPhrase : testPhrase.text;
+            setTestPhrase(getRandomAuthenticationPhrase(currentText));
             setStatus({
               type: "info",
-              message:
-                "Phrase updated. Restart recording to capture a new attempt.",
+              message: `Phrase updated. Restart recording to capture a new attempt. ${DEVICE_GUIDANCE_MESSAGE}`,
             });
           }}
         >
@@ -317,29 +290,39 @@ const UserAuthentication = () => {
           className="typing-area"
           value={typedText}
           onChange={handleTextChange}
-          onKeyDown={handleKeyDown}
+          onKeyDown={handleKeyDownWithValidation}
           onKeyUp={handleKeyUp}
           placeholder="Click 'Start Authentication' then type the phrase above..."
           disabled={!isCapturing && keystrokeData.length === 0}
+          onPaste={(e) => e.preventDefault()}
         />
       </div>
 
       <div style={{ marginBottom: "1rem" }}>
         <p>
-          <strong>Target:</strong> {testPhrase}
+          <strong>Target:</strong>{" "}
+          {typeof testPhrase === "string" ? testPhrase : testPhrase.text}
         </p>
         <p>
           <strong>Typed:</strong> {typedText}
         </p>
         <p>
-          <strong>Progress:</strong> {typedText.length}/{testPhrase.length}{" "}
+          <strong>Progress:</strong> {typedText.length}/
+          {typeof testPhrase === "string"
+            ? testPhrase.length
+            : testPhrase.text.length}{" "}
           characters
         </p>
-        {typedText === testPhrase && typedText.length > 0 && (
-          <p style={{ color: "green", fontWeight: "bold" }}>
-            ✓ Phrase completed!
-          </p>
-        )}
+        <p>
+          <strong>Guidance:</strong> {DEVICE_GUIDANCE_MESSAGE}
+        </p>
+        {typedText ===
+          (typeof testPhrase === "string" ? testPhrase : testPhrase.text) &&
+          typedText.length > 0 && (
+            <p style={{ color: "green", fontWeight: "bold" }}>
+              ✓ Phrase completed!
+            </p>
+          )}
       </div>
 
       <div>
@@ -439,15 +422,12 @@ const UserAuthentication = () => {
           </div>
           {deviceClassification?.predicted && (
             <p style={{ marginTop: "1rem", fontSize: "0.9rem" }}>
-              You indicated{" "}
-              <strong>
-                {getDeviceTypeLabel(lastAttemptDeviceType || inputDeviceType)}
-              </strong>
-              ; model detected{" "}
+              Model detected a typing pattern consistent with{" "}
               <strong>
                 {getDeviceTypeLabel(deviceClassification.predicted)}
               </strong>
-              .
+              . Keep using the digit keys that feel natural—the system will
+              continue to adapt.
             </p>
           )}
         </div>

@@ -51,6 +51,12 @@ class KeystrokeFeatureExtractor:
             hold_times, down_down_times, up_down_times, typing_speed, rhythm_variance
         )
 
+        device_features, device_feature_names = self._calculate_device_usage_metrics(
+            keydown_events
+        )
+        feature_vector.extend(device_features)
+        feature_names.extend(device_feature_names)
+
         return KeystrokePattern(
             user_id="",  # Will be set by caller
             text_typed=text_typed,
@@ -72,12 +78,16 @@ class KeystrokeFeatureExtractor:
         """Calculate dwell time for each key press"""
         hold_times = []
 
-        # Create mapping of key_code to keydown timestamp
-        keydown_map = {e.key_code: e.timestamp for e in keydown_events}
+        # Create mapping of key_code to keydown timestamps to handle repeated keys
+        keydown_map = {}
+        for event in keydown_events:
+            keydown_map.setdefault(event.key_code, []).append(event.timestamp)
 
         for keyup_event in keyup_events:
-            if keyup_event.key_code in keydown_map:
-                hold_time = keyup_event.timestamp - keydown_map[keyup_event.key_code]
+            timestamps = keydown_map.get(keyup_event.key_code)
+            if timestamps:
+                down_timestamp = timestamps.pop(0)
+                hold_time = keyup_event.timestamp - down_timestamp
                 if hold_time > 0:  # Filter out negative times (timing errors)
                     hold_times.append(hold_time)
 
@@ -254,6 +264,77 @@ class KeystrokeFeatureExtractor:
         else:
             features.append(0)
             feature_names.append("rhythm_autocorr")
+
+        return features, feature_names
+
+    def _calculate_device_usage_metrics(
+        self, keydown_events: List[KeystrokeEvent]
+    ) -> Tuple[List[float], List[str]]:
+        """Generate device-specific features such as key ratios and switch counts."""
+
+        numpad_keycodes = set(range(96, 106))  # Numpad digits 0-9
+        keyrow_keycodes = set(range(48, 58))  # Top-row digits 0-9
+
+        total_keydowns = len(keydown_events)
+        numpad_count = 0
+        keyrow_count = 0
+        device_switches = 0
+
+        last_device: Optional[str] = None
+        digit_keycodes: List[int] = []
+
+        for event in keydown_events:
+            device: Optional[str] = None
+            if event.key_code in numpad_keycodes:
+                numpad_count += 1
+                device = InputDeviceType.NUMPAD.value
+                digit_keycodes.append(event.key_code)
+            elif event.key_code in keyrow_keycodes:
+                keyrow_count += 1
+                device = InputDeviceType.KEYROW.value
+                digit_keycodes.append(event.key_code)
+
+            if device:
+                if last_device and last_device != device:
+                    device_switches += 1
+                last_device = device
+
+        digit_total = numpad_count + keyrow_count
+        non_digit_keydowns = total_keydowns - digit_total
+
+        numpad_ratio_all = numpad_count / total_keydowns if total_keydowns else 0.0
+        keyrow_ratio_all = keyrow_count / total_keydowns if total_keydowns else 0.0
+        numpad_ratio_digits = numpad_count / digit_total if digit_total else 0.0
+        keyrow_ratio_digits = keyrow_count / digit_total if digit_total else 0.0
+        switch_rate = device_switches / max(1, digit_total - 1)
+
+        mean_digit_keycode = float(np.mean(digit_keycodes)) if digit_keycodes else 0.0
+
+        features = [
+            numpad_ratio_all,
+            keyrow_ratio_all,
+            numpad_ratio_digits,
+            keyrow_ratio_digits,
+            float(device_switches),
+            switch_rate,
+            float(numpad_count),
+            float(keyrow_count),
+            float(non_digit_keydowns),
+            mean_digit_keycode,
+        ]
+
+        feature_names = [
+            "numpad_ratio_all_keydowns",
+            "keyrow_ratio_all_keydowns",
+            "numpad_ratio_digit_keydowns",
+            "keyrow_ratio_digit_keydowns",
+            "device_switch_count",
+            "device_switch_rate",
+            "numpad_keydown_count",
+            "keyrow_keydown_count",
+            "non_digit_keydown_count",
+            "digit_keycode_mean",
+        ]
 
         return features, feature_names
 
